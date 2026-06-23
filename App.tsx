@@ -10,28 +10,85 @@ import {
   TextInput,
   View
 } from "react-native";
-import { assessments, classGroups, skills } from "./src/data/mockData";
-import { Assessment, ClassGroup, Question, Skill, StudentAssessmentResult } from "./src/types";
+import {
+  assessments,
+  classGroups,
+  interventionPlans,
+  pedagogicalAlerts,
+  reportSnapshots,
+  skills,
+  teacher
+} from "./src/data/mockData";
+import {
+  Badge,
+  BottomSheet,
+  Card,
+  EmptyState,
+  InfoRow,
+  LoadingState,
+  PrimaryButton,
+  ProgressStepper,
+  SecondaryButton,
+  Section,
+  StatCard
+} from "./src/components/ui";
+import { Theme, ThemeProvider, useTheme } from "./src/theme";
+import { Assessment, ClassGroup, DecisionStatus, Skill, StudentAssessmentResult } from "./src/types";
 
-type Screen = "onboarding" | "dashboard" | "template" | "scanner" | "corrected";
+type Route =
+  | "home"
+  | "classes"
+  | "classDetail"
+  | "assessments"
+  | "correction"
+  | "insights"
+  | "intervention"
+  | "reports"
+  | "profile";
 
-type TabItem = {
-  screen: Exclude<Screen, "onboarding">;
+type Tab = "home" | "classes" | "assessments" | "insights" | "profile";
+
+type BottomTab = {
+  id: Tab;
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
+  routes: Route[];
 };
 
-const tabs: TabItem[] = [
-  { screen: "dashboard", label: "Início", icon: "grid-outline" },
-  { screen: "template", label: "Gabarito", icon: "create-outline" },
-  { screen: "scanner", label: "Escanear", icon: "scan-outline" },
-  { screen: "corrected", label: "Prova", icon: "document-text-outline" }
+const bottomTabs: BottomTab[] = [
+  { id: "home", label: "Home", icon: "home-outline", routes: ["home"] },
+  { id: "classes", label: "Turmas", icon: "people-outline", routes: ["classes", "classDetail"] },
+  { id: "assessments", label: "Avaliações", icon: "document-text-outline", routes: ["assessments", "correction"] },
+  { id: "insights", label: "Insights", icon: "sparkles-outline", routes: ["insights", "intervention", "reports"] },
+  { id: "profile", label: "Perfil", icon: "person-circle-outline", routes: ["profile"] }
+];
+
+const correctionSteps = [
+  "Turma",
+  "Avaliação",
+  "Captura",
+  "IA",
+  "Revisão",
+  "Confirmar",
+  "Feedback",
+  "Diagnóstico",
+  "Intervenção"
 ];
 
 const formatDate = (value: string) =>
   new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short" }).format(new Date(value));
 
 const clampPercent = (value: number) => Math.max(0, Math.min(100, value));
+
+const getClassAssessments = (classId: string) => assessments.filter((assessment) => assessment.classId === classId);
+
+const getClassAverage = (classId: string) => {
+  const classAssessments = getClassAssessments(classId);
+  const total = classAssessments.reduce((sum, assessment) => sum + assessment.average, 0);
+  return total / Math.max(classAssessments.length, 1);
+};
+
+const getSkill = (skillId: string) => skills.find((skill) => skill.id === skillId);
 
 const getInitials = (name: string) =>
   name
@@ -41,560 +98,798 @@ const getInitials = (name: string) =>
     .join("")
     .toUpperCase();
 
+const getPrimaryResult = (assessment: Assessment, selectedStudentId: string) =>
+  assessment.results.find((result) => result.studentId === selectedStudentId && result.questionCorrections.length > 0) ??
+  assessment.results.find((result) => result.decision === "ajustar" && result.questionCorrections.length > 0) ??
+  assessment.results.find((result) => result.questionCorrections.length > 0) ??
+  assessment.results[0];
+
+const getConfidence = (result: StudentAssessmentResult) => {
+  if (result.questionCorrections.length === 0) {
+    return 86;
+  }
+
+  const total = result.questionCorrections.reduce((sum, correction) => sum + correction.confidence, 0);
+  return Math.round(total / result.questionCorrections.length);
+};
+
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("onboarding");
+  return (
+    <ThemeProvider>
+      <EduVisionApp />
+    </ThemeProvider>
+  );
+}
+
+function EduVisionApp() {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const [route, setRoute] = useState<Route>("home");
   const [selectedClassId, setSelectedClassId] = useState(classGroups[0].id);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(assessments[0].id);
-  const [selectedStudentId, setSelectedStudentId] = useState("alu-ana");
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [scanComplete, setScanComplete] = useState(false);
+  const [selectedStudentId, setSelectedStudentId] = useState("alu-bruno");
+  const [wizardStep, setWizardStep] = useState(0);
+  const [openSheet, setOpenSheet] = useState<"evidence" | "students" | null>(null);
 
   const selectedClass = useMemo(
     () => classGroups.find((classGroup) => classGroup.id === selectedClassId) ?? classGroups[0],
     [selectedClassId]
   );
 
-  const assessmentsForClass = useMemo(
-    () => assessments.filter((assessment) => assessment.classId === selectedClass.id),
-    [selectedClass.id]
-  );
+  const assessmentsForClass = useMemo(() => getClassAssessments(selectedClass.id), [selectedClass.id]);
 
   const selectedAssessment = useMemo(() => {
-    const fromSelectedClass = assessmentsForClass.find((assessment) => assessment.id === selectedAssessmentId);
-    return fromSelectedClass ?? assessmentsForClass[0] ?? assessments[0];
-  }, [assessmentsForClass, selectedAssessmentId]);
+    const assessment = assessments.find((item) => item.id === selectedAssessmentId);
+    return assessment?.classId === selectedClass.id ? assessment : assessmentsForClass[0] ?? assessments[0];
+  }, [assessmentsForClass, selectedAssessmentId, selectedClass.id]);
 
-  const correctedResult = useMemo(() => {
-    const direct = selectedAssessment.results.find(
-      (result) => result.studentId === selectedStudentId && result.status === "corrigido"
-    );
-    return direct ?? selectedAssessment.results.find((result) => result.status === "corrigido") ?? selectedAssessment.results[0];
-  }, [selectedAssessment, selectedStudentId]);
+  const selectedResult = useMemo(
+    () => getPrimaryResult(selectedAssessment, selectedStudentId),
+    [selectedAssessment, selectedStudentId]
+  );
 
   useEffect(() => {
-    if (!assessmentsForClass.some((assessment) => assessment.id === selectedAssessmentId)) {
-      setSelectedAssessmentId(assessmentsForClass[0]?.id ?? assessments[0].id);
+    const isAssessmentInClass = assessmentsForClass.some((assessment) => assessment.id === selectedAssessmentId);
+    if (!isAssessmentInClass && assessmentsForClass[0]) {
+      setSelectedAssessmentId(assessmentsForClass[0].id);
+      setSelectedStudentId(assessmentsForClass[0].results[0].studentId);
     }
   }, [assessmentsForClass, selectedAssessmentId]);
 
-  const navigate = (nextScreen: Screen) => {
-    if (nextScreen !== "scanner") {
-      setIsProcessing(false);
-      setScanComplete(false);
+  useEffect(() => {
+    if (route !== "correction" || wizardStep !== 3) {
+      return undefined;
     }
-    setScreen(nextScreen);
+
+    const timer = setTimeout(() => setWizardStep(4), 1900);
+    return () => clearTimeout(timer);
+  }, [route, wizardStep]);
+
+  const navigate = (nextRoute: Route) => setRoute(nextRoute);
+
+  const chooseClass = (classId: string, nextRoute: Route = "classDetail") => {
+    const nextAssessment = assessments.find((assessment) => assessment.classId === classId) ?? assessments[0];
+    setSelectedClassId(classId);
+    setSelectedAssessmentId(nextAssessment.id);
+    setSelectedStudentId(nextAssessment.results[0].studentId);
+    navigate(nextRoute);
   };
 
-  const startScan = () => {
-    setIsProcessing(true);
-    setScanComplete(false);
-    setTimeout(() => {
-      const firstCorrected = selectedAssessment.results.find((result) => result.status === "corrigido");
-      if (firstCorrected) {
-        setSelectedStudentId(firstCorrected.studentId);
-      }
-      setIsProcessing(false);
-      setScanComplete(true);
-    }, 2000);
+  const chooseAssessment = (assessment: Assessment, nextRoute: Route = "correction") => {
+    const result = getPrimaryResult(assessment, selectedStudentId);
+    setSelectedAssessmentId(assessment.id);
+    setSelectedStudentId(result.studentId);
+    setWizardStep(0);
+    navigate(nextRoute);
+  };
+
+  const renderRoute = () => {
+    switch (route) {
+      case "home":
+        return (
+          <HomeScreen
+            selectedClass={selectedClass}
+            selectedAssessment={selectedAssessment}
+            onNavigate={navigate}
+            onOpenEvidence={() => setOpenSheet("evidence")}
+          />
+        );
+      case "classes":
+        return <ClassesScreen selectedClass={selectedClass} onChooseClass={chooseClass} />;
+      case "classDetail":
+        return (
+          <ClassDetailScreen
+            selectedClass={selectedClass}
+            assessmentsForClass={assessmentsForClass}
+            onNavigate={navigate}
+            onChooseAssessment={chooseAssessment}
+            onOpenStudents={() => setOpenSheet("students")}
+          />
+        );
+      case "assessments":
+        return (
+          <AssessmentsScreen
+            selectedClass={selectedClass}
+            selectedAssessment={selectedAssessment}
+            onChooseClass={chooseClass}
+            onChooseAssessment={chooseAssessment}
+          />
+        );
+      case "correction":
+        return (
+          <CorrectionWizard
+            selectedClass={selectedClass}
+            selectedAssessment={selectedAssessment}
+            selectedResult={selectedResult}
+            step={wizardStep}
+            setStep={setWizardStep}
+            onChooseClass={chooseClass}
+            onChooseAssessment={(assessment) => {
+              setSelectedAssessmentId(assessment.id);
+              setSelectedStudentId(getPrimaryResult(assessment, selectedStudentId).studentId);
+            }}
+            onFinish={() => navigate("insights")}
+          />
+        );
+      case "insights":
+        return (
+          <InsightsScreen
+            selectedClass={selectedClass}
+            selectedAssessment={selectedAssessment}
+            onNavigate={navigate}
+            onOpenEvidence={() => setOpenSheet("evidence")}
+          />
+        );
+      case "intervention":
+        return <InterventionScreen selectedClass={selectedClass} selectedAssessment={selectedAssessment} onNavigate={navigate} />;
+      case "reports":
+        return <ReportsScreen selectedClass={selectedClass} assessmentsForClass={assessmentsForClass} />;
+      case "profile":
+        return <ProfileScreen />;
+      default:
+        return null;
+    }
   };
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
-      {screen === "onboarding" ? (
-        <OnboardingScreen onEnter={() => navigate("dashboard")} />
-      ) : (
-        <View style={styles.appShell}>
-          <TopBar
-            selectedClass={selectedClass}
-            onSelectClass={(classId) => {
-              setSelectedClassId(classId);
-              const nextAssessment = assessments.find((assessment) => assessment.classId === classId);
-              if (nextAssessment) {
-                setSelectedAssessmentId(nextAssessment.id);
-                const nextResult = nextAssessment.results.find((result) => result.status === "corrigido");
-                if (nextResult) {
-                  setSelectedStudentId(nextResult.studentId);
-                }
-              }
-            }}
-          />
-          <View style={styles.content}>
-            {screen === "dashboard" && (
-              <DashboardScreen
-                selectedClass={selectedClass}
-                selectedAssessment={selectedAssessment}
-                assessmentsForClass={assessmentsForClass}
-                onSelectAssessment={(assessment) => {
-                  setSelectedAssessmentId(assessment.id);
-                  const firstCorrected = assessment.results.find((result) => result.status === "corrigido");
-                  if (firstCorrected) {
-                    setSelectedStudentId(firstCorrected.studentId);
-                  }
-                }}
-                onOpenScanner={() => navigate("scanner")}
-                onOpenTemplate={() => navigate("template")}
-              />
-            )}
-            {screen === "template" && <TemplateScreen assessment={selectedAssessment} />}
-            {screen === "scanner" && (
-              <ScannerScreen
-                assessment={selectedAssessment}
-                selectedClass={selectedClass}
-                isProcessing={isProcessing}
-                scanComplete={scanComplete}
-                onStartScan={startScan}
-                onOpenCorrected={() => navigate("corrected")}
-              />
-            )}
-            {screen === "corrected" && (
-              <CorrectedExamScreen
-                assessment={selectedAssessment}
-                selectedClass={selectedClass}
-                result={correctedResult}
-                onSelectStudent={setSelectedStudentId}
-              />
-            )}
-          </View>
-          <BottomTabs currentScreen={screen} onNavigate={navigate} />
-        </View>
-      )}
+      <StatusBar style={theme.mode === "dark" ? "light" : "dark"} />
+      <View style={styles.appShell}>
+        <AppHeader route={route} selectedClass={selectedClass} onHome={() => navigate("home")} />
+        <View style={styles.content}>{renderRoute()}</View>
+        <BottomTabs currentRoute={route} onNavigate={(tab) => navigate(tab)} />
+        <EvidenceSheet
+          visible={openSheet === "evidence"}
+          assessment={selectedAssessment}
+          onClose={() => setOpenSheet(null)}
+        />
+        <StudentsSheet
+          visible={openSheet === "students"}
+          selectedClass={selectedClass}
+          onClose={() => setOpenSheet(null)}
+        />
+      </View>
     </SafeAreaView>
   );
 }
 
-function OnboardingScreen({ onEnter }: { onEnter: () => void }) {
+function AppHeader({
+  route,
+  selectedClass,
+  onHome
+}: {
+  route: Route;
+  selectedClass: ClassGroup;
+  onHome: () => void;
+}) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const routeLabel = {
+    home: "Home",
+    classes: "Turmas",
+    classDetail: selectedClass.name,
+    assessments: "Avaliações",
+    correction: "Correção",
+    insights: "Insights",
+    intervention: "Intervenção",
+    reports: "Relatórios",
+    profile: "Perfil"
+  }[route];
+
   return (
-    <ScrollView contentContainerStyle={styles.onboarding}>
-      <View style={styles.brandRow}>
-        <View style={styles.logoMark}>
-          <Ionicons name="school-outline" size={30} color="#FFFFFF" />
+    <View style={styles.header}>
+      <Pressable style={styles.brand} onPress={onHome}>
+        <View style={styles.logo}>
+          <Ionicons name="school-outline" size={20} color={theme.colors.background} />
         </View>
         <View>
           <Text style={styles.brandName}>EduVision</Text>
-          <Text style={styles.brandMantra}>Avaliação que orienta</Text>
+          <Text style={styles.brandSubtitle}>Avaliação que orienta</Text>
         </View>
+      </Pressable>
+      <View style={styles.routePill}>
+        <Text style={styles.routePillText}>{routeLabel}</Text>
       </View>
-      <View style={styles.heroPanel}>
-        <View style={styles.heroMetric}>
-          <Text style={styles.heroMetricValue}>2 min</Text>
-          <Text style={styles.heroMetricLabel}>para corrigir uma pilha inicial</Text>
-        </View>
-        <View style={styles.heroVisual}>
-          <View style={styles.paperSheet}>
-            <View style={styles.paperHeader} />
-            <View style={styles.answerLineWide} />
-            <View style={styles.answerLine} />
-            <View style={styles.answerGrid}>
-              {["A", "B", "C", "D"].map((item, index) => (
-                <View key={item} style={[styles.answerBubble, index === 2 && styles.answerBubbleActive]}>
-                  <Text style={[styles.answerBubbleText, index === 2 && styles.answerBubbleTextActive]}>{item}</Text>
-                </View>
-              ))}
-            </View>
-            <View style={styles.aiNote}>
-              <Ionicons name="sparkles-outline" size={16} color="#0F766E" />
-              <Text style={styles.aiNoteText}>Feedback gerado</Text>
-            </View>
-          </View>
-        </View>
-      </View>
-      <Text style={styles.onboardingTitle}>Corrija, diagnostique e planeje a próxima aula com evidências.</Text>
-      <Text style={styles.onboardingBody}>
-        Entre no modo demonstrativo para explorar turmas, gabaritos, digitalização por IA e devolutivas pedagógicas.
-      </Text>
-      <View style={styles.onboardingActions}>
-        <PrimaryButton label="Criar conta de professor" icon="person-add-outline" onPress={onEnter} />
-        <SecondaryButton label="Acessar modo demonstrativo" icon="play-circle-outline" onPress={onEnter} />
-      </View>
-      <View style={styles.onboardingFeatureGrid}>
-        <FeaturePill icon="camera-outline" label="Correção via câmera" />
-        <FeaturePill icon="analytics-outline" label="Diagnóstico por habilidade" />
-        <FeaturePill icon="chatbubble-ellipses-outline" label="Feedback discursivo" />
-      </View>
-    </ScrollView>
-  );
-}
-
-function TopBar({
-  selectedClass,
-  onSelectClass
-}: {
-  selectedClass: ClassGroup;
-  onSelectClass: (classId: string) => void;
-}) {
-  return (
-    <View style={styles.topBar}>
-      <View>
-        <Text style={styles.topEyebrow}>EduVision</Text>
-        <Text style={styles.topTitle}>Painel do Professor</Text>
-      </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.classSelector}>
-        {classGroups.map((classGroup) => (
-          <Pressable
-            key={classGroup.id}
-            onPress={() => onSelectClass(classGroup.id)}
-            style={[styles.classChip, selectedClass.id === classGroup.id && styles.classChipActive]}
-          >
-            <View style={[styles.classDot, { backgroundColor: classGroup.color }]} />
-            <Text style={[styles.classChipText, selectedClass.id === classGroup.id && styles.classChipTextActive]}>
-              {classGroup.name}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
     </View>
   );
 }
 
-function DashboardScreen({
+function HomeScreen({
   selectedClass,
   selectedAssessment,
-  assessmentsForClass,
-  onSelectAssessment,
-  onOpenScanner,
-  onOpenTemplate
+  onNavigate,
+  onOpenEvidence
 }: {
   selectedClass: ClassGroup;
   selectedAssessment: Assessment;
-  assessmentsForClass: Assessment[];
-  onSelectAssessment: (assessment: Assessment) => void;
-  onOpenScanner: () => void;
-  onOpenTemplate: () => void;
+  onNavigate: (route: Route) => void;
+  onOpenEvidence: () => void;
 }) {
-  const classAverage = useMemo(() => {
-    const total = assessmentsForClass.reduce((sum, assessment) => sum + assessment.average, 0);
-    return total / Math.max(assessmentsForClass.length, 1);
-  }, [assessmentsForClass]);
-
-  const vulnerableSkills = useMemo(
-    () => [...skills].sort((first, second) => second.vulnerability - first.vulnerability).slice(0, 4),
-    []
-  );
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const pendingValidations = selectedAssessment.pendingValidations;
+  const attentionStudents = selectedClass.students.filter((student) => student.risk !== "baixo").length;
 
   return (
-    <ScrollView contentContainerStyle={styles.screenScroll}>
-      <View style={styles.dashboardHero}>
-        <View style={styles.dashboardHeroText}>
-          <Text style={styles.sectionEyebrow}>{selectedClass.grade}</Text>
-          <Text style={styles.dashboardTitle}>{selectedClass.name}</Text>
-          <Text style={styles.dashboardSubtitle}>
-            {selectedClass.subjectFocus} · {selectedClass.room}
-          </Text>
-        </View>
-        <View style={styles.heroScoreCard}>
-          <Text style={styles.heroScore}>{classAverage.toFixed(1)}</Text>
-          <Text style={styles.heroScoreLabel}>média geral</Text>
-        </View>
+    <Screen>
+      <Card elevated style={styles.heroCard}>
+        <Text style={styles.eyebrow}>Olá, {teacher.name.split(" ")[0]}</Text>
+        <Text style={styles.heroTitle}>Você tem {pendingValidations} correções para revisar.</Text>
+        <Text style={styles.heroBody}>
+          Comece pela avaliação de {selectedAssessment.title}. A IA já organizou os pontos de atenção.
+        </Text>
+        <PrimaryButton label="Continuar correção" icon="arrow-forward-outline" onPress={() => onNavigate("correction")} />
+      </Card>
+
+      <View style={styles.statsRow}>
+        <StatCard label="Pendentes" value={`${pendingValidations}`} icon="shield-checkmark-outline" tone="warning" />
+        <StatCard label="Turmas" value={`${classGroups.length}`} icon="people-outline" />
+        <StatCard label="Apoio" value={`${attentionStudents}`} icon="heart-outline" tone="danger" />
       </View>
 
-      <View style={styles.metricRow}>
-        <MetricCard icon="people-outline" label="Alunos" value={`${selectedClass.students.length}`} tone="#0F766E" />
-        <MetricCard icon="reader-outline" label="Avaliações" value={`${assessmentsForClass.length}`} tone="#2563EB" />
-        <MetricCard
-          icon="checkmark-done-outline"
-          label="Correção"
-          value={`${Math.round(selectedAssessment.correctionProgress)}%`}
-          tone="#7C3AED"
-        />
-      </View>
+      <Section title="Resumo das turmas" subtitle="Só o suficiente para decidir o próximo passo.">
+        <Card>
+          <InfoRow
+            icon="people-outline"
+            title={selectedClass.name}
+            subtitle={`${selectedClass.students.length} alunos · média ${getClassAverage(selectedClass.id).toFixed(1)}`}
+            right={<Badge label="prioridade" icon="flag-outline" tone="warning" />}
+            onPress={() => onNavigate("classDetail")}
+          />
+        </Card>
+      </Section>
 
-      <View style={styles.sectionHeader}>
-        <View>
-          <Text style={styles.sectionTitle}>Avaliações recentes</Text>
-          <Text style={styles.sectionSubtitle}>Selecione uma prova para atualizar gabarito, scanner e devolutiva.</Text>
-        </View>
-      </View>
-
-      {assessmentsForClass.map((assessment) => (
-        <AssessmentRow
-          key={assessment.id}
-          assessment={assessment}
-          isActive={assessment.id === selectedAssessment.id}
-          onPress={() => onSelectAssessment(assessment)}
-        />
-      ))}
-
-      <View style={styles.actionGrid}>
-        <ActionPanel
-          icon="scan-outline"
-          title="Corrigir nova prova"
-          body="Abrir simulação de câmera, OCR e inferência de IA."
-          onPress={onOpenScanner}
-        />
-        <ActionPanel
-          icon="options-outline"
-          title="Configurar critérios"
-          body="Editar gabarito objetivo e rubricas das discursivas."
-          onPress={onOpenTemplate}
-        />
-      </View>
-
-      <View style={styles.sectionHeader}>
-        <View>
-          <Text style={styles.sectionTitle}>Habilidades curriculares</Text>
-          <Text style={styles.sectionSubtitle}>Domínio e vulnerabilidade calculados a partir das correções.</Text>
-        </View>
-      </View>
-
-      <View style={styles.skillBoard}>
-        {vulnerableSkills.map((skill) => (
-          <SkillBar key={skill.id} skill={skill} />
-        ))}
-      </View>
-    </ScrollView>
+      <Section title="Alerta importante">
+        <Card>
+          <InfoRow
+            icon="sparkles-outline"
+            title={pedagogicalAlerts[0].title}
+            subtitle="Sua turma apresentou dificuldade em converter fração para decimal."
+            onPress={onOpenEvidence}
+          />
+        </Card>
+      </Section>
+    </Screen>
   );
 }
 
-function TemplateScreen({ assessment }: { assessment: Assessment }) {
-  const [selectedQuestionId, setSelectedQuestionId] = useState(assessment.questions[0]?.id);
-  const selectedQuestion = assessment.questions.find((question) => question.id === selectedQuestionId) ?? assessment.questions[0];
+function ClassesScreen({
+  selectedClass,
+  onChooseClass
+}: {
+  selectedClass: ClassGroup;
+  onChooseClass: (classId: string) => void;
+}) {
+  return (
+    <Screen>
+      <Section
+        eyebrow="Turmas"
+        title="Escolha onde atuar"
+        subtitle="Uma lista simples para evitar a sensação de painel pesado."
+      >
+        <Card>
+          {classGroups.map((classGroup) => (
+            <InfoRow
+              key={classGroup.id}
+              icon="people-outline"
+              title={classGroup.name}
+              subtitle={`${classGroup.subjectFocus} · ${classGroup.students.length} alunos`}
+              right={
+                classGroup.id === selectedClass.id ? (
+                  <Badge label="ativa" icon="checkmark-outline" />
+                ) : undefined
+              }
+              onPress={() => onChooseClass(classGroup.id)}
+            />
+          ))}
+        </Card>
+      </Section>
+    </Screen>
+  );
+}
+
+function ClassDetailScreen({
+  selectedClass,
+  assessmentsForClass,
+  onNavigate,
+  onChooseAssessment,
+  onOpenStudents
+}: {
+  selectedClass: ClassGroup;
+  assessmentsForClass: Assessment[];
+  onNavigate: (route: Route) => void;
+  onChooseAssessment: (assessment: Assessment, nextRoute?: Route) => void;
+  onOpenStudents: () => void;
+}) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const criticalSkill = getSkill(selectedClass.criticalSkillIds[0]);
+  const attentionStudents = selectedClass.students.filter((student) => student.risk !== "baixo").length;
+
+  return (
+    <Screen>
+      <Section eyebrow={selectedClass.grade} title={selectedClass.name} subtitle={selectedClass.subjectFocus}>
+        <Card elevated>
+          <TextBlock
+            title={criticalSkill ? `Foco sugerido: ${criticalSkill.name}` : "Turma em acompanhamento"}
+            body="A próxima ação recomendada é revisar as correções pendentes antes de planejar a retomada."
+          />
+          <PrimaryButton label="Iniciar correção" icon="scan-outline" onPress={() => onNavigate("correction")} />
+        </Card>
+      </Section>
+
+      <View style={styles.statsRow}>
+        <StatCard label="Média" value={getClassAverage(selectedClass.id).toFixed(1)} icon="analytics-outline" />
+        <StatCard label="Apoio" value={`${attentionStudents}`} icon="heart-outline" tone="warning" />
+        <StatCard label="Provas" value={`${assessmentsForClass.length}`} icon="documents-outline" />
+      </View>
+
+      <Section title="Avaliações recentes">
+        <Card>
+          {assessmentsForClass.slice(0, 2).map((assessment) => (
+            <InfoRow
+              key={assessment.id}
+              icon="document-text-outline"
+              title={assessment.title}
+              subtitle={`${formatDate(assessment.date)} · média ${assessment.average.toFixed(1)}`}
+              onPress={() => onChooseAssessment(assessment, "correction")}
+            />
+          ))}
+        </Card>
+      </Section>
+
+      <SecondaryButton label="Ver alunos em atenção" icon="people-outline" onPress={onOpenStudents} />
+    </Screen>
+  );
+}
+
+function AssessmentsScreen({
+  selectedClass,
+  selectedAssessment,
+  onChooseClass,
+  onChooseAssessment
+}: {
+  selectedClass: ClassGroup;
+  selectedAssessment: Assessment;
+  onChooseClass: (classId: string, nextRoute?: Route) => void;
+  onChooseAssessment: (assessment: Assessment, nextRoute?: Route) => void;
+}) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const assessmentsForClass = getClassAssessments(selectedClass.id);
+
+  return (
+    <Screen>
+      <Section eyebrow="Avaliações" title="Selecione o que corrigir" subtitle="Uma avaliação por vez. Menos ansiedade, mais foco.">
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+          {classGroups.map((classGroup) => (
+            <Pressable
+              key={classGroup.id}
+              style={[styles.classChip, classGroup.id === selectedClass.id && styles.classChipActive]}
+              onPress={() => onChooseClass(classGroup.id, "assessments")}
+            >
+              <Text style={[styles.classChipText, classGroup.id === selectedClass.id && styles.classChipTextActive]}>
+                {classGroup.name}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </Section>
+
+      <Card>
+        {assessmentsForClass.map((assessment) => (
+          <InfoRow
+            key={assessment.id}
+            icon="document-text-outline"
+            title={assessment.title}
+            subtitle={`${assessment.pendingValidations} validações · ${assessment.correctionProgress}% corrigida`}
+            right={
+              assessment.id === selectedAssessment.id ? (
+                <Badge label="selecionada" icon="checkmark-outline" />
+              ) : undefined
+            }
+            onPress={() => onChooseAssessment(assessment, "correction")}
+          />
+        ))}
+      </Card>
+
+      <PrimaryButton label="Começar fluxo guiado" icon="arrow-forward-outline" onPress={() => onChooseAssessment(selectedAssessment, "correction")} />
+    </Screen>
+  );
+}
+
+function CorrectionWizard({
+  selectedClass,
+  selectedAssessment,
+  selectedResult,
+  step,
+  setStep,
+  onChooseClass,
+  onChooseAssessment,
+  onFinish
+}: {
+  selectedClass: ClassGroup;
+  selectedAssessment: Assessment;
+  selectedResult: StudentAssessmentResult;
+  step: number;
+  setStep: (step: number) => void;
+  onChooseClass: (classId: string, nextRoute?: Route) => void;
+  onChooseAssessment: (assessment: Assessment) => void;
+  onFinish: () => void;
+}) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const [decision, setDecision] = useState<DecisionStatus>(selectedResult.decision);
+  const [grade, setGrade] = useState(selectedResult.grade.toFixed(1));
+  const [feedback, setFeedback] = useState(selectedResult.finalFeedback);
+  const currentStudent = selectedClass.students.find((student) => student.id === selectedResult.studentId) ?? selectedClass.students[0];
+  const criticalSkill = selectedClass.criticalSkillIds.map(getSkill).filter(Boolean)[0] as Skill | undefined;
+  const canGoBack = step > 0;
+  const isProcessing = step === 3;
 
   useEffect(() => {
-    setSelectedQuestionId(assessment.questions[0]?.id);
-  }, [assessment.id, assessment.questions]);
+    setDecision(selectedResult.decision);
+    setGrade(selectedResult.grade.toFixed(1));
+    setFeedback(selectedResult.finalFeedback);
+  }, [selectedResult]);
+
+  const next = () => {
+    if (step >= correctionSteps.length - 1) {
+      onFinish();
+      return;
+    }
+    setStep(step + 1);
+  };
+
+  const ctaLabel = [
+    "Confirmar turma",
+    "Confirmar avaliação",
+    "Capturar prova",
+    "Analisando...",
+    "Revisar decisão",
+    "Confirmar nota",
+    "Salvar feedback",
+    "Gerar intervenção",
+    "Ver insights"
+  ][step];
 
   return (
-    <ScrollView contentContainerStyle={styles.screenScroll}>
-      <View style={styles.pageTitleRow}>
-        <View>
-          <Text style={styles.sectionEyebrow}>Gabarito parametrizável</Text>
-          <Text style={styles.pageTitle}>{assessment.title}</Text>
-          <Text style={styles.sectionSubtitle}>{assessment.subject} · {formatDate(assessment.date)}</Text>
-        </View>
-        <View style={styles.statusBadge}>
-          <Ionicons name="shield-checkmark-outline" size={16} color="#0F766E" />
-          <Text style={styles.statusBadgeText}>Critérios ativos</Text>
-        </View>
-      </View>
+    <Screen>
+      <Section eyebrow="Fluxo guiado" title={correctionSteps[step]} subtitle="Cada tela mostra só a decisão necessária agora.">
+        <ProgressStepper steps={correctionSteps} currentIndex={step} />
+      </Section>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.questionTabs}>
-        {assessment.questions.map((question) => (
-          <Pressable
-            key={question.id}
-            onPress={() => setSelectedQuestionId(question.id)}
-            style={[styles.questionTab, selectedQuestion.id === question.id && styles.questionTabActive]}
-          >
-            <Text style={[styles.questionTabText, selectedQuestion.id === question.id && styles.questionTabTextActive]}>
-              Q{question.number}
-            </Text>
-            <Text style={styles.questionTabKind}>{question.type}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
+      {step === 0 ? (
+        <Card>
+          {classGroups.map((classGroup) => (
+            <InfoRow
+              key={classGroup.id}
+              icon="people-outline"
+              title={classGroup.name}
+              subtitle={`${classGroup.students.length} alunos · ${classGroup.subjectFocus}`}
+              right={classGroup.id === selectedClass.id ? <Badge label="selecionada" icon="checkmark-outline" /> : undefined}
+              onPress={() => onChooseClass(classGroup.id, "correction")}
+            />
+          ))}
+        </Card>
+      ) : null}
 
-      <QuestionEditor question={selectedQuestion} />
+      {step === 1 ? (
+        <Card>
+          {getClassAssessments(selectedClass.id).map((assessment) => (
+            <InfoRow
+              key={assessment.id}
+              icon="document-text-outline"
+              title={assessment.title}
+              subtitle={`${assessment.pendingValidations} aguardando revisão · ${formatDate(assessment.date)}`}
+              right={assessment.id === selectedAssessment.id ? <Badge label="selecionada" icon="checkmark-outline" /> : undefined}
+              onPress={() => onChooseAssessment(assessment)}
+            />
+          ))}
+        </Card>
+      ) : null}
 
-      <View style={styles.criteriaSummary}>
-        <Text style={styles.sectionTitle}>Mapa pedagógico da avaliação</Text>
-        {assessment.questions.map((question) => (
-          <View key={question.id} style={styles.criteriaRow}>
-            <View style={styles.criteriaNumber}>
-              <Text style={styles.criteriaNumberText}>{question.number}</Text>
-            </View>
-            <View style={styles.criteriaContent}>
-              <Text style={styles.criteriaTitle}>{question.statement}</Text>
-              <Text style={styles.criteriaMeta}>
-                {question.points} pts · {question.type} · {question.skillIds.map((skillId) => skills.find((skill) => skill.id === skillId)?.name).filter(Boolean).join(", ")}
-              </Text>
+      {step === 2 ? (
+        <Card elevated>
+          <View style={styles.captureFrame}>
+            <View style={styles.scanCorners}>
+              <Ionicons name="scan-outline" size={42} color={theme.colors.primary} />
+              <Text style={styles.captureTitle}>Posicione a prova</Text>
+              <Text style={styles.captureBody}>A câmera simulada lê respostas e aplica a rubrica salva.</Text>
             </View>
           </View>
-        ))}
+          <InfoRow icon="camera-outline" title="Foto nítida detectada" subtitle="A prova está dentro da área recomendada." />
+        </Card>
+      ) : null}
+
+      {step === 3 ? <LoadingState title="Analisando respostas..." body="Lendo imagem, entendendo respostas e preparando uma sugestão para você revisar." /> : null}
+
+      {step === 4 ? (
+        <Card elevated>
+          <View style={styles.reviewHeader}>
+            <Avatar name={currentStudent.name} color={currentStudent.avatarColor} />
+            <View style={styles.reviewText}>
+              <Text style={styles.cardTitle}>{currentStudent.name}</Text>
+              <Text style={styles.mutedText}>{selectedAssessment.title}</Text>
+            </View>
+            <View style={styles.scoreBubble}>
+              <Text style={styles.scoreText}>{selectedResult.grade.toFixed(1)}</Text>
+            </View>
+          </View>
+          <TextBlock title="Sugestão da IA" body={selectedResult.summary} />
+          <InfoRow
+            icon="shield-checkmark-outline"
+            title={`Confiança ${getConfidence(selectedResult)}%`}
+            subtitle="Revise antes de confirmar. Você mantém a decisão final."
+          />
+        </Card>
+      ) : null}
+
+      {step === 5 ? (
+        <Card>
+          <TextBlock title="Confirme com autonomia" body="A IA apoia a correção. A nota final só vale depois da sua validação." />
+          <View style={styles.decisionRow}>
+            {(["aprovar", "ajustar", "rejeitar"] as DecisionStatus[]).map((item) => (
+              <Pressable
+                key={item}
+                style={[styles.decisionPill, decision === item && styles.decisionPillActive]}
+                onPress={() => setDecision(item)}
+              >
+                <Text style={[styles.decisionText, decision === item && styles.decisionTextActive]}>
+                  {item === "aprovar" ? "Aprovar" : item === "ajustar" ? "Ajustar" : "Rejeitar"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={styles.inputLabel}>Nota final</Text>
+          <TextInput value={grade} onChangeText={setGrade} keyboardType="decimal-pad" style={styles.input} />
+        </Card>
+      ) : null}
+
+      {step === 6 ? (
+        <Card>
+          <TextBlock title="Feedback para o aluno" body="Texto simples, construtivo e editável." />
+          <TextInput
+            value={feedback}
+            onChangeText={setFeedback}
+            multiline
+            style={[styles.input, styles.feedbackInput]}
+          />
+        </Card>
+      ) : null}
+
+      {step === 7 ? (
+        <Card elevated>
+          <Badge label="Insight principal" icon="sparkles-outline" />
+          <TextBlock
+            title="Sua turma apresentou dificuldade nesta habilidade."
+            body={selectedAssessment.corePattern}
+          />
+          <View style={styles.statsRow}>
+            <StatCard label="Habilidade" value={`${criticalSkill?.vulnerability ?? 0}%`} icon="warning-outline" tone="warning" />
+            <StatCard label="Alunos" value={`${selectedClass.students.filter((student) => student.risk !== "baixo").length}`} icon="people-outline" />
+          </View>
+        </Card>
+      ) : null}
+
+      {step === 8 ? (
+        <Card elevated>
+          <TextBlock
+            title="Sugestão para ajudar os alunos"
+            body="Retomada guiada com exercícios progressivos de fração para decimal antes da próxima avaliação."
+          />
+          <InfoRow icon="calendar-outline" title="Prazo sugerido" subtitle="Até a próxima aula da semana" />
+          <InfoRow icon="people-outline" title="Grupo recomendado" subtitle="Bruno, Camila e Diego" />
+        </Card>
+      ) : null}
+
+      <View style={styles.wizardActions}>
+        <SecondaryButton label="Voltar" icon="arrow-back-outline" onPress={() => setStep(step - 1)} disabled={!canGoBack} />
+        <PrimaryButton label={ctaLabel} icon="arrow-forward-outline" onPress={next} disabled={isProcessing} />
       </View>
-    </ScrollView>
+    </Screen>
   );
 }
 
-function ScannerScreen({
-  assessment,
+function InsightsScreen({
   selectedClass,
-  isProcessing,
-  scanComplete,
-  onStartScan,
-  onOpenCorrected
+  selectedAssessment,
+  onNavigate,
+  onOpenEvidence
 }: {
-  assessment: Assessment;
   selectedClass: ClassGroup;
-  isProcessing: boolean;
-  scanComplete: boolean;
-  onStartScan: () => void;
-  onOpenCorrected: () => void;
+  selectedAssessment: Assessment;
+  onNavigate: (route: Route) => void;
+  onOpenEvidence: () => void;
+}) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const criticalSkill = selectedClass.criticalSkillIds.map(getSkill).filter(Boolean)[0] as Skill | undefined;
+
+  return (
+    <Screen>
+      <Section eyebrow="Insights" title="O que merece atenção agora?" subtitle="Um insight principal, poucas métricas e uma recomendação.">
+        <Card elevated>
+          <Badge label={criticalSkill?.code ?? "Habilidade"} icon="ribbon-outline" tone="warning" />
+          <TextBlock title="Sua turma apresentou dificuldades nesta habilidade." body={selectedAssessment.corePattern} />
+          <PrimaryButton label="Ver sugestões para ajudar" icon="construct-outline" onPress={() => onNavigate("intervention")} />
+        </Card>
+      </Section>
+
+      <View style={styles.statsRow}>
+        <StatCard label="Domínio" value={`${criticalSkill?.mastery ?? 0}%`} icon="trending-up-outline" />
+        <StatCard label="Apoio" value={`${selectedClass.students.filter((student) => student.risk !== "baixo").length}`} icon="heart-outline" tone="warning" />
+        <StatCard label="Progresso" value={`${selectedClass.performanceTrend > 0 ? "+" : ""}${selectedClass.performanceTrend}%`} icon="analytics-outline" />
+      </View>
+
+      <SecondaryButton label="Ver evidências" icon="document-text-outline" onPress={onOpenEvidence} />
+      <SecondaryButton label="Abrir relatório" icon="bar-chart-outline" onPress={() => onNavigate("reports")} />
+    </Screen>
+  );
+}
+
+function InterventionScreen({
+  selectedClass,
+  selectedAssessment,
+  onNavigate
+}: {
+  selectedClass: ClassGroup;
+  selectedAssessment: Assessment;
+  onNavigate: (route: Route) => void;
+}) {
+  const plan =
+    interventionPlans.find((item) => item.classId === selectedClass.id && item.assessmentId === selectedAssessment.id) ??
+    interventionPlans[0];
+
+  return (
+    <Screen>
+      <Section eyebrow="Intervenção" title="Sugestões para ajudar os alunos" subtitle="Baseado nos erros mais frequentes da turma.">
+        <Card elevated>
+          <Badge label={`Prioridade ${plan.priority}`} icon="flag-outline" tone={plan.priority === "Alta" ? "warning" : "primary"} />
+          <TextBlock title={plan.title} body={plan.evidence} />
+          {plan.steps.slice(0, 3).map((step, index) => (
+            <InfoRow key={step} icon="checkmark-circle-outline" title={`${index + 1}. ${step}`} />
+          ))}
+        </Card>
+      </Section>
+      <PrimaryButton label="Abrir relatório" icon="bar-chart-outline" onPress={() => onNavigate("reports")} />
+    </Screen>
+  );
+}
+
+function ReportsScreen({
+  selectedClass,
+  assessmentsForClass
+}: {
+  selectedClass: ClassGroup;
+  assessmentsForClass: Assessment[];
+}) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
+  return (
+    <Screen>
+      <Section eyebrow="Relatório" title="Resumo para coordenação" subtitle="Enxuto, exportável e fácil de explicar.">
+        <View style={styles.statsRow}>
+          {reportSnapshots.slice(0, 3).map((snapshot, index) => (
+            <StatCard
+              key={snapshot.id}
+              label={snapshot.title}
+              value={snapshot.value}
+              icon={index === 0 ? "checkmark-done-outline" : index === 1 ? "time-outline" : "ribbon-outline"}
+              tone={index === 2 ? "warning" : "primary"}
+            />
+          ))}
+        </View>
+      </Section>
+      <Card>
+        {assessmentsForClass.map((assessment) => (
+          <InfoRow
+            key={assessment.id}
+            icon="analytics-outline"
+            title={assessment.title}
+            subtitle={`${formatDate(assessment.date)} · média ${assessment.average.toFixed(1)}`}
+            right={<MiniProgress value={assessment.average * 10} />}
+          />
+        ))}
+      </Card>
+      <SecondaryButton label="Exportar relatório mockado" icon="download-outline" onPress={() => undefined} />
+    </Screen>
+  );
+}
+
+function ProfileScreen() {
+  const { mode, toggleMode } = useTheme();
+
+  return (
+    <Screen>
+      <Section eyebrow="Perfil" title={teacher.name} subtitle={`${teacher.role} · ${teacher.school}`}>
+        <Card elevated>
+          <InfoRow icon="person-outline" title="Modo professor" subtitle="Decisão final sempre humana." />
+          <InfoRow
+            icon={mode === "dark" ? "moon-outline" : "sunny-outline"}
+            title="Aparência"
+            subtitle={mode === "dark" ? "Dark mode premium ativado" : "Light mode ativado"}
+            right={<Badge label={mode === "dark" ? "dark" : "light"} icon="contrast-outline" />}
+            onPress={toggleMode}
+          />
+          <InfoRow icon="shield-checkmark-outline" title="Preferência salva" subtitle="O tema escolhido fica persistido neste navegador." />
+        </Card>
+      </Section>
+    </Screen>
+  );
+}
+
+function EvidenceSheet({
+  visible,
+  assessment,
+  onClose
+}: {
+  visible: boolean;
+  assessment: Assessment;
+  onClose: () => void;
 }) {
   return (
-    <ScrollView contentContainerStyle={styles.screenScroll}>
-      <View style={styles.pageTitleRow}>
-        <View>
-          <Text style={styles.sectionEyebrow}>Motor de correção com IA</Text>
-          <Text style={styles.pageTitle}>Digitalizar prova</Text>
-          <Text style={styles.sectionSubtitle}>{selectedClass.name} · {assessment.title}</Text>
-        </View>
-      </View>
-
-      <View style={styles.cameraFrame}>
-        <View style={styles.cameraTopBar}>
-          <View style={styles.cameraPill}>
-            <View style={styles.liveDot} />
-            <Text style={styles.cameraPillText}>Câmera simulada</Text>
-          </View>
-          <Ionicons name="flash-outline" size={22} color="#E2E8F0" />
-        </View>
-        <View style={styles.scanTarget}>
-          <View style={styles.cornerTopLeft} />
-          <View style={styles.cornerTopRight} />
-          <View style={styles.cornerBottomLeft} />
-          <View style={styles.cornerBottomRight} />
-          <View style={styles.examPreview}>
-            <View style={styles.examPreviewHeader} />
-            <View style={styles.examPreviewLine} />
-            <View style={styles.examPreviewLineShort} />
-            <View style={styles.examPreviewOptions}>
-              {[1, 2, 3, 4].map((item) => (
-                <View key={item} style={styles.examPreviewOption} />
-              ))}
-            </View>
-            <View style={styles.examPreviewTextBlock} />
-            <View style={styles.examPreviewTextBlockSmall} />
-          </View>
-        </View>
-        <View style={styles.cameraFooter}>
-          {isProcessing ? (
-            <View style={styles.processingBox}>
-              <Ionicons name="sync-outline" size={24} color="#38BDF8" />
-              <View>
-                <Text style={styles.processingTitle}>Processando Imagem / OCR / Inferência da IA...</Text>
-                <Text style={styles.processingSubtitle}>Validando gabarito, caligrafia e rubricas discursivas</Text>
-              </View>
-            </View>
-          ) : scanComplete ? (
-            <View style={styles.successBox}>
-              <Ionicons name="checkmark-circle-outline" size={28} color="#34D399" />
-              <View style={styles.successTextBlock}>
-                <Text style={styles.successTitle}>Teste corrigido com sucesso</Text>
-                <Text style={styles.successSubtitle}>Nota, comentários e plano de estudo prontos para revisão.</Text>
-              </View>
-            </View>
-          ) : (
-            <Text style={styles.cameraHint}>Posicione a prova dentro da área marcada para iniciar a leitura.</Text>
-          )}
-        </View>
-      </View>
-
-      <View style={styles.scannerActions}>
-        <PrimaryButton
-          label={isProcessing ? "Processando..." : scanComplete ? "Escanear novamente" : "Iniciar digitalização"}
-          icon={isProcessing ? "hourglass-outline" : "scan-outline"}
-          onPress={onStartScan}
-          disabled={isProcessing}
-        />
-        <SecondaryButton
-          label="Ver prova corrigida"
-          icon="document-text-outline"
-          onPress={onOpenCorrected}
-          disabled={!scanComplete}
-        />
-      </View>
-
-      <View style={styles.pipeline}>
-        <PipelineStep icon="camera-outline" title="Captura" detail="Detecção de bordas e nitidez" active />
-        <PipelineStep icon="text-outline" title="OCR" detail="Leitura de alternativas e caligrafia" active={isProcessing || scanComplete} />
-        <PipelineStep icon="sparkles-outline" title="IA pedagógica" detail="Correção discursiva por rubricas" active={isProcessing || scanComplete} />
-        <PipelineStep icon="analytics-outline" title="Diagnóstico" detail="Atualização de habilidades" active={scanComplete} />
-      </View>
-    </ScrollView>
+    <BottomSheet visible={visible} title="Evidências" onClose={onClose}>
+      <InfoRow icon="sparkles-outline" title="Padrão encontrado" subtitle={assessment.corePattern} />
+      <InfoRow icon="document-text-outline" title="Questão mais sensível" subtitle={assessment.questions[2]?.statement ?? assessment.questions[0]?.statement} />
+      <InfoRow icon="shield-checkmark-outline" title="Professor decide" subtitle="A sugestão só vira nota após validação docente." />
+    </BottomSheet>
   );
 }
 
-function CorrectedExamScreen({
-  assessment,
+function StudentsSheet({
+  visible,
   selectedClass,
-  result,
-  onSelectStudent
+  onClose
 }: {
-  assessment: Assessment;
+  visible: boolean;
   selectedClass: ClassGroup;
-  result: StudentAssessmentResult;
-  onSelectStudent: (studentId: string) => void;
+  onClose: () => void;
 }) {
-  const student = selectedClass.students.find((item) => item.id === result.studentId) ?? selectedClass.students[0];
-  const correctedResults = assessment.results.filter((item) => item.status === "corrigido");
-  const percentage = Math.round((result.grade / result.maxGrade) * 100);
+  const attentionStudents = selectedClass.students.filter((student) => student.risk !== "baixo");
 
   return (
-    <ScrollView contentContainerStyle={styles.screenScroll}>
-      <View style={styles.pageTitleRow}>
-        <View>
-          <Text style={styles.sectionEyebrow}>Prova corrigida</Text>
-          <Text style={styles.pageTitle}>{student.name}</Text>
-          <Text style={styles.sectionSubtitle}>{assessment.title} · {assessment.subject}</Text>
-        </View>
-        <View style={styles.gradeBadge}>
-          <Text style={styles.gradeValue}>{result.grade.toFixed(1)}</Text>
-          <Text style={styles.gradeMax}>/ {result.maxGrade}</Text>
-        </View>
-      </View>
-
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.studentSelector}>
-        {correctedResults.map((item) => {
-          const itemStudent = selectedClass.students.find((studentItem) => studentItem.id === item.studentId);
-          if (!itemStudent) {
-            return null;
-          }
-          const active = item.studentId === result.studentId;
-          return (
-            <Pressable
-              key={item.studentId}
-              onPress={() => onSelectStudent(item.studentId)}
-              style={[styles.studentChip, active && styles.studentChipActive]}
-            >
-              <View style={[styles.studentAvatar, { backgroundColor: itemStudent.avatarColor }]}>
-                <Text style={styles.studentAvatarText}>{getInitials(itemStudent.name)}</Text>
-              </View>
-              <Text style={[styles.studentChipText, active && styles.studentChipTextActive]}>{itemStudent.name.split(" ")[0]}</Text>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
-
-      <View style={styles.correctedSummary}>
-        <View style={styles.circularScore}>
-          <Text style={styles.circularScoreText}>{percentage}%</Text>
-        </View>
-        <View style={styles.correctedSummaryText}>
-          <Text style={styles.correctedSummaryTitle}>Síntese da IA</Text>
-          <Text style={styles.correctedSummaryBody}>{result.summary}</Text>
-        </View>
-      </View>
-
-      {assessment.questions.map((question) => {
-        const correction = result.questionCorrections.find((item) => item.questionId === question.id);
-        if (!correction) {
-          return null;
-        }
-        return <CorrectionCard key={question.id} question={question} correction={correction} />;
-      })}
-
-      <View style={styles.studyPlan}>
-        <Text style={styles.sectionTitle}>Plano de estudo sugerido</Text>
-        {result.recommendedPlan.map((item) => (
-          <View key={item} style={styles.planItem}>
-            <Ionicons name="checkmark-circle-outline" size={20} color="#0F766E" />
-            <Text style={styles.planText}>{item}</Text>
-          </View>
-        ))}
-      </View>
-    </ScrollView>
+    <BottomSheet visible={visible} title="Alunos em atenção" onClose={onClose}>
+      {attentionStudents.map((student) => (
+        <InfoRow key={student.id} icon="heart-outline" title={student.name} subtitle={student.note} />
+      ))}
+    </BottomSheet>
   );
 }
 
-function BottomTabs({ currentScreen, onNavigate }: { currentScreen: Screen; onNavigate: (screen: Screen) => void }) {
+function BottomTabs({ currentRoute, onNavigate }: { currentRoute: Route; onNavigate: (route: Route) => void }) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
   return (
     <View style={styles.bottomTabs}>
-      {tabs.map((tab) => {
-        const active = currentScreen === tab.screen;
+      {bottomTabs.map((tab) => {
+        const active = tab.routes.includes(currentRoute);
         return (
-          <Pressable key={tab.screen} style={styles.tabButton} onPress={() => onNavigate(tab.screen)}>
-            <Ionicons name={tab.icon} size={22} color={active ? "#0F766E" : "#94A3B8"} />
-            <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{tab.label}</Text>
+          <Pressable key={tab.id} style={styles.tabButton} onPress={() => onNavigate(tab.id)}>
+            <Ionicons name={tab.icon} size={21} color={active ? theme.colors.primary : theme.colors.textSoft} />
+            <Text style={[styles.tabText, active && styles.tabTextActive]}>{tab.label}</Text>
           </Pressable>
         );
       })}
@@ -602,1357 +897,330 @@ function BottomTabs({ currentScreen, onNavigate }: { currentScreen: Screen; onNa
   );
 }
 
-function MetricCard({ icon, label, value, tone }: { icon: keyof typeof Ionicons.glyphMap; label: string; value: string; tone: string }) {
+function Screen({ children }: { children: React.ReactNode }) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
+  return <ScrollView contentContainerStyle={styles.screen}>{children}</ScrollView>;
+}
+
+function TextBlock({ title, body }: { title: string; body: string }) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
   return (
-    <View style={styles.metricCard}>
-      <View style={[styles.metricIcon, { backgroundColor: `${tone}18` }]}>
-        <Ionicons name={icon} size={20} color={tone} />
-      </View>
-      <Text style={styles.metricValue}>{value}</Text>
-      <Text style={styles.metricLabel}>{label}</Text>
+    <View style={styles.textBlock}>
+      <Text style={styles.cardTitle}>{title}</Text>
+      <Text style={styles.mutedText}>{body}</Text>
     </View>
   );
 }
 
-function AssessmentRow({
-  assessment,
-  isActive,
-  onPress
-}: {
-  assessment: Assessment;
-  isActive: boolean;
-  onPress: () => void;
-}) {
-  const corrected = assessment.results.filter((result) => result.status === "corrigido").length;
+function Avatar({ name, color }: { name: string; color: string }) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
 
   return (
-    <Pressable onPress={onPress} style={[styles.assessmentRow, isActive && styles.assessmentRowActive]}>
-      <View style={styles.assessmentIcon}>
-        <Ionicons name="document-attach-outline" size={22} color="#0F766E" />
-      </View>
-      <View style={styles.assessmentInfo}>
-        <Text style={styles.assessmentTitle}>{assessment.title}</Text>
-        <Text style={styles.assessmentMeta}>{assessment.subject} · {formatDate(assessment.date)} · {corrected}/{assessment.results.length} corrigidas</Text>
-        <ProgressBar value={assessment.correctionProgress} color="#0F766E" />
-      </View>
-      <View style={styles.assessmentAverage}>
-        <Text style={styles.assessmentAverageValue}>{assessment.average.toFixed(1)}</Text>
-        <Text style={styles.assessmentAverageLabel}>média</Text>
-      </View>
-    </Pressable>
-  );
-}
-
-function ActionPanel({
-  icon,
-  title,
-  body,
-  onPress
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  title: string;
-  body: string;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable onPress={onPress} style={styles.actionPanel}>
-      <View style={styles.actionIcon}>
-        <Ionicons name={icon} size={22} color="#0F766E" />
-      </View>
-      <Text style={styles.actionTitle}>{title}</Text>
-      <Text style={styles.actionBody}>{body}</Text>
-    </Pressable>
-  );
-}
-
-function SkillBar({ skill }: { skill: Skill }) {
-  return (
-    <View style={styles.skillBarCard}>
-      <View style={styles.skillHeader}>
-        <View>
-          <Text style={styles.skillName}>{skill.name}</Text>
-          <Text style={styles.skillArea}>{skill.area}</Text>
-        </View>
-        <Text style={styles.skillPercent}>{skill.mastery}%</Text>
-      </View>
-      <ProgressBar value={skill.mastery} color={skill.vulnerability > 40 ? "#F97316" : "#0F766E"} />
-      <Text style={styles.skillInsight}>{skill.vulnerability}% de vulnerabilidade identificada nas últimas correções</Text>
+    <View style={[styles.avatar, { backgroundColor: color }]}>
+      <Text style={styles.avatarText}>{getInitials(name)}</Text>
     </View>
   );
 }
 
-function QuestionEditor({ question }: { question: Question }) {
-  const [answer, setAnswer] = useState(question.correctAnswer);
-  const [criteria, setCriteria] = useState(question.acceptanceCriteria.join("\n"));
-
-  useEffect(() => {
-    setAnswer(question.correctAnswer);
-    setCriteria(question.acceptanceCriteria.join("\n"));
-  }, [question]);
+function MiniProgress({ value }: { value: number }) {
+  const { theme } = useTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
 
   return (
-    <View style={styles.editorCard}>
-      <View style={styles.editorHeader}>
-        <View style={styles.questionNumberLarge}>
-          <Text style={styles.questionNumberLargeText}>Q{question.number}</Text>
-        </View>
-        <View style={styles.editorTitleWrap}>
-          <Text style={styles.editorTitle}>{question.statement}</Text>
-          <Text style={styles.editorMeta}>{question.type} · {question.points} pontos</Text>
-        </View>
-      </View>
-
-      <Text style={styles.inputLabel}>Resposta correta ou referência esperada</Text>
-      <TextInput
-        value={answer}
-        onChangeText={setAnswer}
-        multiline
-        style={[styles.textInput, question.type === "discursiva" && styles.textAreaInput]}
-        placeholder="Insira a resposta correta"
-        placeholderTextColor="#94A3B8"
-      />
-
-      <Text style={styles.inputLabel}>Critérios de aceitação</Text>
-      <TextInput
-        value={criteria}
-        onChangeText={setCriteria}
-        multiline
-        style={styles.textAreaInput}
-        placeholder="Um critério por linha"
-        placeholderTextColor="#94A3B8"
-      />
-
-      <View style={styles.skillTags}>
-        {question.skillIds.map((skillId) => {
-          const skill = skills.find((item) => item.id === skillId);
-          if (!skill) {
-            return null;
-          }
-          return (
-            <View key={skill.id} style={styles.skillTag}>
-              <Ionicons name="ribbon-outline" size={15} color="#0F766E" />
-              <Text style={styles.skillTagText}>{skill.name}</Text>
-            </View>
-          );
-        })}
-      </View>
+    <View style={styles.miniProgress}>
+      <View style={[styles.miniProgressFill, { width: `${clampPercent(value)}%` }]} />
     </View>
   );
 }
 
-function PipelineStep({
-  icon,
-  title,
-  detail,
-  active
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  title: string;
-  detail: string;
-  active: boolean;
-}) {
-  return (
-    <View style={[styles.pipelineStep, active && styles.pipelineStepActive]}>
-      <View style={[styles.pipelineIcon, active && styles.pipelineIconActive]}>
-        <Ionicons name={icon} size={20} color={active ? "#FFFFFF" : "#94A3B8"} />
-      </View>
-      <View style={styles.pipelineText}>
-        <Text style={[styles.pipelineTitle, active && styles.pipelineTitleActive]}>{title}</Text>
-        <Text style={styles.pipelineDetail}>{detail}</Text>
-      </View>
-    </View>
-  );
+function createStyles(theme: Theme) {
+  return StyleSheet.create({
+    safeArea: {
+      flex: 1,
+      backgroundColor: theme.colors.background
+    },
+    appShell: {
+      flex: 1,
+      backgroundColor: theme.colors.background
+    },
+    content: {
+      flex: 1
+    },
+    screen: {
+      padding: theme.spacing.lg,
+      paddingBottom: 116,
+      gap: theme.spacing.lg
+    },
+    header: {
+      paddingHorizontal: theme.spacing.lg,
+      paddingTop: theme.spacing.md,
+      paddingBottom: theme.spacing.md,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.colors.border,
+      backgroundColor: theme.colors.background,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: theme.spacing.md
+    },
+    brand: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing.sm,
+      flex: 1
+    },
+    logo: {
+      width: 38,
+      height: 38,
+      borderRadius: theme.radius.md,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: theme.colors.primary
+    },
+    brandName: {
+      color: theme.colors.text,
+      fontSize: 18,
+      fontWeight: "900"
+    },
+    brandSubtitle: {
+      color: theme.colors.textMuted,
+      fontSize: theme.typography.caption,
+      fontWeight: "800"
+    },
+    routePill: {
+      borderRadius: theme.radius.pill,
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.sm,
+      backgroundColor: theme.colors.surface
+    },
+    routePillText: {
+      color: theme.colors.textMuted,
+      fontSize: theme.typography.caption,
+      fontWeight: "900"
+    },
+    heroCard: {
+      gap: theme.spacing.md
+    },
+    eyebrow: {
+      color: theme.colors.primary,
+      fontSize: theme.typography.caption,
+      fontWeight: "900",
+      textTransform: "uppercase",
+      letterSpacing: 0
+    },
+    heroTitle: {
+      color: theme.colors.text,
+      fontSize: theme.typography.hero,
+      lineHeight: 36,
+      fontWeight: "900"
+    },
+    heroBody: {
+      color: theme.colors.textMuted,
+      fontSize: 15,
+      lineHeight: 22
+    },
+    statsRow: {
+      flexDirection: "row",
+      gap: theme.spacing.sm
+    },
+    chipRow: {
+      gap: theme.spacing.sm,
+      paddingRight: theme.spacing.lg
+    },
+    classChip: {
+      borderRadius: theme.radius.pill,
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.sm,
+      backgroundColor: theme.colors.surface,
+      borderColor: theme.colors.border,
+      borderWidth: 1
+    },
+    classChipActive: {
+      backgroundColor: theme.colors.primarySoft,
+      borderColor: theme.colors.primary
+    },
+    classChipText: {
+      color: theme.colors.textMuted,
+      fontWeight: "900"
+    },
+    classChipTextActive: {
+      color: theme.colors.primary
+    },
+    captureFrame: {
+      minHeight: 290,
+      borderRadius: theme.radius.lg,
+      backgroundColor: theme.colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: theme.spacing.md
+    },
+    scanCorners: {
+      width: "78%",
+      minHeight: 210,
+      borderRadius: theme.radius.lg,
+      borderWidth: 2,
+      borderColor: theme.colors.primary,
+      borderStyle: "dashed",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: theme.spacing.lg,
+      gap: theme.spacing.sm
+    },
+    captureTitle: {
+      color: theme.colors.text,
+      fontSize: 19,
+      fontWeight: "900",
+      textAlign: "center"
+    },
+    captureBody: {
+      color: theme.colors.textMuted,
+      textAlign: "center",
+      lineHeight: 20
+    },
+    reviewHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing.md,
+      marginBottom: theme.spacing.md
+    },
+    reviewText: {
+      flex: 1
+    },
+    avatar: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      alignItems: "center",
+      justifyContent: "center"
+    },
+    avatarText: {
+      color: theme.colors.text,
+      fontWeight: "900"
+    },
+    scoreBubble: {
+      width: 56,
+      height: 56,
+      borderRadius: 28,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: theme.colors.primarySoft
+    },
+    scoreText: {
+      color: theme.colors.primary,
+      fontSize: 18,
+      fontWeight: "900"
+    },
+    textBlock: {
+      gap: theme.spacing.xs
+    },
+    cardTitle: {
+      color: theme.colors.text,
+      fontSize: 18,
+      lineHeight: 24,
+      fontWeight: "900"
+    },
+    mutedText: {
+      color: theme.colors.textMuted,
+      fontSize: theme.typography.body,
+      lineHeight: 20
+    },
+    wizardActions: {
+      gap: theme.spacing.sm
+    },
+    decisionRow: {
+      flexDirection: "row",
+      gap: theme.spacing.sm,
+      marginVertical: theme.spacing.md
+    },
+    decisionPill: {
+      flex: 1,
+      minHeight: 46,
+      borderRadius: theme.radius.md,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: theme.colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: theme.colors.border
+    },
+    decisionPillActive: {
+      backgroundColor: theme.colors.primary,
+      borderColor: theme.colors.primary
+    },
+    decisionText: {
+      color: theme.colors.textMuted,
+      fontWeight: "900",
+      fontSize: 13
+    },
+    decisionTextActive: {
+      color: theme.colors.background
+    },
+    inputLabel: {
+      color: theme.colors.text,
+      fontSize: 13,
+      fontWeight: "900",
+      marginBottom: theme.spacing.sm
+    },
+    input: {
+      minHeight: 50,
+      borderRadius: theme.radius.md,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.sm,
+      color: theme.colors.text,
+      backgroundColor: theme.colors.surfaceRaised,
+      fontSize: 15
+    },
+    feedbackInput: {
+      minHeight: 190,
+      textAlignVertical: "top",
+      marginTop: theme.spacing.md
+    },
+    miniProgress: {
+      width: 62,
+      height: 7,
+      borderRadius: theme.radius.pill,
+      overflow: "hidden",
+      backgroundColor: theme.colors.surfaceSoft
+    },
+    miniProgressFill: {
+      height: "100%",
+      borderRadius: theme.radius.pill,
+      backgroundColor: theme.colors.primary
+    },
+    bottomTabs: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      bottom: 0,
+      flexDirection: "row",
+      paddingTop: theme.spacing.sm,
+      paddingBottom: theme.spacing.md,
+      borderTopWidth: 1,
+      borderTopColor: theme.colors.border,
+      backgroundColor: theme.colors.surface
+    },
+    tabButton: {
+      flex: 1,
+      minHeight: 54,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 4
+    },
+    tabText: {
+      color: theme.colors.textSoft,
+      fontSize: 11,
+      fontWeight: "900"
+    },
+    tabTextActive: {
+      color: theme.colors.primary
+    }
+  });
 }
-
-function CorrectionCard({
-  question,
-  correction
-}: {
-  question: Question;
-  correction: StudentAssessmentResult["questionCorrections"][number];
-}) {
-  return (
-    <View style={styles.correctionCard}>
-      <View style={styles.correctionHeader}>
-        <View style={styles.correctionQuestionBadge}>
-          <Text style={styles.correctionQuestionText}>Q{question.number}</Text>
-        </View>
-        <View style={styles.correctionHeaderText}>
-          <Text style={styles.correctionStatement}>{question.statement}</Text>
-          <Text style={styles.correctionMeta}>{question.type} · confiança IA {correction.confidence}%</Text>
-        </View>
-        <Text style={styles.correctionScore}>{correction.score}/{correction.maxScore}</Text>
-      </View>
-      <View style={styles.answerBox}>
-        <Text style={styles.answerLabel}>Resposta do aluno</Text>
-        <Text style={styles.answerText}>{correction.answer}</Text>
-      </View>
-      <View style={styles.feedbackBox}>
-        <Ionicons name={correction.isCorrect ? "sparkles-outline" : "alert-circle-outline"} size={20} color={correction.isCorrect ? "#0F766E" : "#F97316"} />
-        <Text style={styles.feedbackText}>{correction.aiFeedback}</Text>
-      </View>
-      <View style={styles.handwritingBox}>
-        <Ionicons name="pencil-outline" size={17} color="#64748B" />
-        <Text style={styles.handwritingText}>{correction.handwritingSignal}</Text>
-      </View>
-    </View>
-  );
-}
-
-function FeaturePill({ icon, label }: { icon: keyof typeof Ionicons.glyphMap; label: string }) {
-  return (
-    <View style={styles.featurePill}>
-      <Ionicons name={icon} size={18} color="#0F766E" />
-      <Text style={styles.featurePillText}>{label}</Text>
-    </View>
-  );
-}
-
-function ProgressBar({ value, color }: { value: number; color: string }) {
-  return (
-    <View style={styles.progressTrack}>
-      <View style={[styles.progressFill, { width: `${clampPercent(value)}%`, backgroundColor: color }]} />
-    </View>
-  );
-}
-
-function PrimaryButton({
-  label,
-  icon,
-  onPress,
-  disabled
-}: {
-  label: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable onPress={onPress} disabled={disabled} style={[styles.primaryButton, disabled && styles.disabledButton]}>
-      <Ionicons name={icon} size={20} color="#FFFFFF" />
-      <Text style={styles.primaryButtonText}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function SecondaryButton({
-  label,
-  icon,
-  onPress,
-  disabled
-}: {
-  label: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable onPress={onPress} disabled={disabled} style={[styles.secondaryButton, disabled && styles.secondaryButtonDisabled]}>
-      <Ionicons name={icon} size={20} color={disabled ? "#94A3B8" : "#0F766E"} />
-      <Text style={[styles.secondaryButtonText, disabled && styles.secondaryButtonTextDisabled]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: "#F8FAFC"
-  },
-  appShell: {
-    flex: 1,
-    backgroundColor: "#F8FAFC"
-  },
-  content: {
-    flex: 1
-  },
-  onboarding: {
-    padding: 24,
-    gap: 22,
-    backgroundColor: "#F8FAFC"
-  },
-  brandRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-    marginTop: 8
-  },
-  logoMark: {
-    width: 54,
-    height: 54,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#0F766E"
-  },
-  brandName: {
-    fontSize: 25,
-    fontWeight: "800",
-    color: "#0F172A"
-  },
-  brandMantra: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#0F766E",
-    marginTop: 2
-  },
-  heroPanel: {
-    backgroundColor: "#0F172A",
-    borderRadius: 8,
-    padding: 18,
-    gap: 18
-  },
-  heroMetric: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 10
-  },
-  heroMetricValue: {
-    color: "#FFFFFF",
-    fontSize: 38,
-    fontWeight: "900"
-  },
-  heroMetricLabel: {
-    color: "#CBD5E1",
-    fontSize: 14,
-    flex: 1,
-    marginBottom: 7
-  },
-  heroVisual: {
-    alignItems: "center"
-  },
-  paperSheet: {
-    width: "92%",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 18,
-    gap: 12
-  },
-  paperHeader: {
-    height: 12,
-    width: "55%",
-    borderRadius: 4,
-    backgroundColor: "#CBD5E1"
-  },
-  answerLineWide: {
-    height: 8,
-    width: "85%",
-    borderRadius: 4,
-    backgroundColor: "#E2E8F0"
-  },
-  answerLine: {
-    height: 8,
-    width: "64%",
-    borderRadius: 4,
-    backgroundColor: "#E2E8F0"
-  },
-  answerGrid: {
-    flexDirection: "row",
-    gap: 10,
-    marginVertical: 4
-  },
-  answerBubble: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "#CBD5E1"
-  },
-  answerBubbleActive: {
-    backgroundColor: "#0F766E",
-    borderColor: "#0F766E"
-  },
-  answerBubbleText: {
-    color: "#64748B",
-    fontWeight: "800"
-  },
-  answerBubbleTextActive: {
-    color: "#FFFFFF"
-  },
-  aiNote: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#ECFDF5",
-    borderRadius: 8,
-    padding: 10
-  },
-  aiNoteText: {
-    color: "#0F766E",
-    fontWeight: "700"
-  },
-  onboardingTitle: {
-    fontSize: 31,
-    lineHeight: 38,
-    fontWeight: "900",
-    color: "#0F172A"
-  },
-  onboardingBody: {
-    fontSize: 16,
-    lineHeight: 24,
-    color: "#475569"
-  },
-  onboardingActions: {
-    gap: 12
-  },
-  onboardingFeatureGrid: {
-    gap: 10
-  },
-  featurePill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    padding: 14,
-    borderRadius: 8,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E2E8F0"
-  },
-  featurePillText: {
-    color: "#334155",
-    fontWeight: "700"
-  },
-  topBar: {
-    paddingHorizontal: 18,
-    paddingTop: 12,
-    paddingBottom: 12,
-    gap: 12,
-    backgroundColor: "#FFFFFF",
-    borderBottomWidth: 1,
-    borderBottomColor: "#E2E8F0"
-  },
-  topEyebrow: {
-    color: "#0F766E",
-    fontSize: 12,
-    fontWeight: "900",
-    textTransform: "uppercase",
-    letterSpacing: 0
-  },
-  topTitle: {
-    fontSize: 22,
-    fontWeight: "900",
-    color: "#0F172A"
-  },
-  classSelector: {
-    gap: 8,
-    paddingRight: 12
-  },
-  classChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderRadius: 8,
-    backgroundColor: "#F8FAFC",
-    borderWidth: 1,
-    borderColor: "#E2E8F0"
-  },
-  classChipActive: {
-    backgroundColor: "#ECFDF5",
-    borderColor: "#99F6E4"
-  },
-  classDot: {
-    width: 9,
-    height: 9,
-    borderRadius: 5
-  },
-  classChipText: {
-    color: "#64748B",
-    fontWeight: "800"
-  },
-  classChipTextActive: {
-    color: "#0F766E"
-  },
-  screenScroll: {
-    padding: 18,
-    paddingBottom: 110,
-    gap: 16
-  },
-  dashboardHero: {
-    borderRadius: 8,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    padding: 18,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 14
-  },
-  dashboardHeroText: {
-    flex: 1
-  },
-  sectionEyebrow: {
-    color: "#0F766E",
-    fontSize: 12,
-    fontWeight: "900",
-    textTransform: "uppercase",
-    letterSpacing: 0
-  },
-  dashboardTitle: {
-    fontSize: 29,
-    color: "#0F172A",
-    fontWeight: "900",
-    marginTop: 4
-  },
-  dashboardSubtitle: {
-    color: "#64748B",
-    fontSize: 14,
-    marginTop: 4,
-    lineHeight: 20
-  },
-  heroScoreCard: {
-    width: 92,
-    height: 92,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#0F766E"
-  },
-  heroScore: {
-    color: "#FFFFFF",
-    fontSize: 28,
-    fontWeight: "900"
-  },
-  heroScoreLabel: {
-    color: "#CCFBF1",
-    fontSize: 12,
-    fontWeight: "700"
-  },
-  metricRow: {
-    flexDirection: "row",
-    gap: 10
-  },
-  metricCard: {
-    flex: 1,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 13,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    minHeight: 116
-  },
-  metricIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 10
-  },
-  metricValue: {
-    color: "#0F172A",
-    fontWeight: "900",
-    fontSize: 22
-  },
-  metricLabel: {
-    color: "#64748B",
-    fontWeight: "700",
-    fontSize: 12,
-    marginTop: 2
-  },
-  sectionHeader: {
-    marginTop: 4
-  },
-  sectionTitle: {
-    fontSize: 19,
-    color: "#0F172A",
-    fontWeight: "900"
-  },
-  sectionSubtitle: {
-    color: "#64748B",
-    fontSize: 13,
-    lineHeight: 19,
-    marginTop: 4
-  },
-  assessmentRow: {
-    flexDirection: "row",
-    gap: 12,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    alignItems: "center"
-  },
-  assessmentRowActive: {
-    borderColor: "#0F766E",
-    backgroundColor: "#F0FDFA"
-  },
-  assessmentIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#CCFBF1"
-  },
-  assessmentInfo: {
-    flex: 1,
-    gap: 7
-  },
-  assessmentTitle: {
-    color: "#0F172A",
-    fontWeight: "900",
-    fontSize: 15
-  },
-  assessmentMeta: {
-    color: "#64748B",
-    fontSize: 12,
-    lineHeight: 17
-  },
-  assessmentAverage: {
-    alignItems: "center",
-    minWidth: 46
-  },
-  assessmentAverageValue: {
-    color: "#0F172A",
-    fontWeight: "900",
-    fontSize: 20
-  },
-  assessmentAverageLabel: {
-    color: "#64748B",
-    fontSize: 11,
-    fontWeight: "700"
-  },
-  progressTrack: {
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: "#E2E8F0",
-    overflow: "hidden"
-  },
-  progressFill: {
-    height: "100%",
-    borderRadius: 4
-  },
-  actionGrid: {
-    gap: 12
-  },
-  actionPanel: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    gap: 8
-  },
-  actionIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 8,
-    backgroundColor: "#ECFDF5",
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  actionTitle: {
-    color: "#0F172A",
-    fontWeight: "900",
-    fontSize: 16
-  },
-  actionBody: {
-    color: "#64748B",
-    lineHeight: 20
-  },
-  skillBoard: {
-    gap: 12
-  },
-  skillBarCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    gap: 10
-  },
-  skillHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12
-  },
-  skillName: {
-    color: "#0F172A",
-    fontWeight: "900",
-    fontSize: 15
-  },
-  skillArea: {
-    color: "#64748B",
-    fontSize: 12,
-    marginTop: 2
-  },
-  skillPercent: {
-    color: "#0F172A",
-    fontWeight: "900",
-    fontSize: 18
-  },
-  skillInsight: {
-    color: "#64748B",
-    fontSize: 12
-  },
-  pageTitleRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    gap: 14,
-    alignItems: "flex-start"
-  },
-  pageTitle: {
-    fontSize: 25,
-    color: "#0F172A",
-    fontWeight: "900",
-    marginTop: 4
-  },
-  statusBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "#ECFDF5",
-    borderWidth: 1,
-    borderColor: "#A7F3D0"
-  },
-  statusBadgeText: {
-    color: "#0F766E",
-    fontWeight: "800",
-    fontSize: 12
-  },
-  questionTabs: {
-    gap: 10,
-    paddingRight: 12
-  },
-  questionTab: {
-    width: 76,
-    padding: 12,
-    borderRadius: 8,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E2E8F0"
-  },
-  questionTabActive: {
-    backgroundColor: "#0F766E",
-    borderColor: "#0F766E"
-  },
-  questionTabText: {
-    fontSize: 17,
-    fontWeight: "900",
-    color: "#0F172A"
-  },
-  questionTabTextActive: {
-    color: "#FFFFFF"
-  },
-  questionTabKind: {
-    color: "#94A3B8",
-    fontSize: 11,
-    marginTop: 4
-  },
-  editorCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    gap: 12
-  },
-  editorHeader: {
-    flexDirection: "row",
-    gap: 12,
-    alignItems: "flex-start"
-  },
-  questionNumberLarge: {
-    width: 50,
-    height: 50,
-    borderRadius: 8,
-    backgroundColor: "#ECFDF5",
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  questionNumberLargeText: {
-    color: "#0F766E",
-    fontWeight: "900"
-  },
-  editorTitleWrap: {
-    flex: 1
-  },
-  editorTitle: {
-    color: "#0F172A",
-    fontSize: 17,
-    lineHeight: 23,
-    fontWeight: "900"
-  },
-  editorMeta: {
-    color: "#64748B",
-    marginTop: 4,
-    fontSize: 13
-  },
-  inputLabel: {
-    color: "#334155",
-    fontWeight: "900",
-    fontSize: 13,
-    marginTop: 4
-  },
-  textInput: {
-    minHeight: 50,
-    borderWidth: 1,
-    borderColor: "#CBD5E1",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: "#0F172A",
-    backgroundColor: "#F8FAFC",
-    fontSize: 15
-  },
-  textAreaInput: {
-    minHeight: 104,
-    textAlignVertical: "top"
-  },
-  skillTags: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8
-  },
-  skillTag: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "#ECFDF5"
-  },
-  skillTagText: {
-    color: "#0F766E",
-    fontWeight: "800",
-    fontSize: 12
-  },
-  criteriaSummary: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    gap: 12
-  },
-  criteriaRow: {
-    flexDirection: "row",
-    gap: 12,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: "#E2E8F0"
-  },
-  criteriaNumber: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#F1F5F9"
-  },
-  criteriaNumberText: {
-    color: "#0F172A",
-    fontWeight: "900"
-  },
-  criteriaContent: {
-    flex: 1
-  },
-  criteriaTitle: {
-    color: "#0F172A",
-    fontWeight: "800",
-    lineHeight: 20
-  },
-  criteriaMeta: {
-    color: "#64748B",
-    fontSize: 12,
-    lineHeight: 18,
-    marginTop: 4
-  },
-  cameraFrame: {
-    backgroundColor: "#020617",
-    borderRadius: 8,
-    padding: 16,
-    gap: 16,
-    minHeight: 520
-  },
-  cameraTopBar: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center"
-  },
-  cameraPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#1E293B",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8
-  },
-  liveDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: "#EF4444"
-  },
-  cameraPillText: {
-    color: "#E2E8F0",
-    fontWeight: "800",
-    fontSize: 12
-  },
-  scanTarget: {
-    flex: 1,
-    minHeight: 340,
-    alignItems: "center",
-    justifyContent: "center",
-    position: "relative",
-    borderRadius: 8,
-    backgroundColor: "#0F172A"
-  },
-  cornerTopLeft: {
-    position: "absolute",
-    top: 24,
-    left: 24,
-    width: 44,
-    height: 44,
-    borderTopWidth: 3,
-    borderLeftWidth: 3,
-    borderColor: "#38BDF8"
-  },
-  cornerTopRight: {
-    position: "absolute",
-    top: 24,
-    right: 24,
-    width: 44,
-    height: 44,
-    borderTopWidth: 3,
-    borderRightWidth: 3,
-    borderColor: "#38BDF8"
-  },
-  cornerBottomLeft: {
-    position: "absolute",
-    bottom: 24,
-    left: 24,
-    width: 44,
-    height: 44,
-    borderBottomWidth: 3,
-    borderLeftWidth: 3,
-    borderColor: "#38BDF8"
-  },
-  cornerBottomRight: {
-    position: "absolute",
-    bottom: 24,
-    right: 24,
-    width: 44,
-    height: 44,
-    borderBottomWidth: 3,
-    borderRightWidth: 3,
-    borderColor: "#38BDF8"
-  },
-  examPreview: {
-    width: "68%",
-    minHeight: 250,
-    backgroundColor: "#F8FAFC",
-    borderRadius: 8,
-    padding: 18,
-    gap: 12,
-    transform: [{ rotate: "-2deg" }]
-  },
-  examPreviewHeader: {
-    height: 14,
-    width: "70%",
-    backgroundColor: "#CBD5E1",
-    borderRadius: 4
-  },
-  examPreviewLine: {
-    height: 8,
-    width: "92%",
-    backgroundColor: "#E2E8F0",
-    borderRadius: 4
-  },
-  examPreviewLineShort: {
-    height: 8,
-    width: "60%",
-    backgroundColor: "#E2E8F0",
-    borderRadius: 4
-  },
-  examPreviewOptions: {
-    flexDirection: "row",
-    gap: 8
-  },
-  examPreviewOption: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: "#94A3B8"
-  },
-  examPreviewTextBlock: {
-    height: 54,
-    backgroundColor: "#E2E8F0",
-    borderRadius: 8
-  },
-  examPreviewTextBlockSmall: {
-    height: 36,
-    width: "80%",
-    backgroundColor: "#E2E8F0",
-    borderRadius: 8
-  },
-  cameraFooter: {
-    minHeight: 70,
-    justifyContent: "center"
-  },
-  cameraHint: {
-    color: "#CBD5E1",
-    textAlign: "center",
-    fontWeight: "700",
-    lineHeight: 20
-  },
-  processingBox: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    backgroundColor: "#082F49",
-    borderRadius: 8,
-    padding: 12
-  },
-  processingTitle: {
-    color: "#E0F2FE",
-    fontWeight: "900"
-  },
-  processingSubtitle: {
-    color: "#BAE6FD",
-    fontSize: 12,
-    marginTop: 2
-  },
-  successBox: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    backgroundColor: "#064E3B",
-    borderRadius: 8,
-    padding: 12
-  },
-  successTextBlock: {
-    flex: 1
-  },
-  successTitle: {
-    color: "#D1FAE5",
-    fontWeight: "900"
-  },
-  successSubtitle: {
-    color: "#A7F3D0",
-    fontSize: 12,
-    marginTop: 2
-  },
-  scannerActions: {
-    gap: 10
-  },
-  pipeline: {
-    gap: 10
-  },
-  pipelineStep: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    padding: 14,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    backgroundColor: "#FFFFFF"
-  },
-  pipelineStepActive: {
-    borderColor: "#99F6E4",
-    backgroundColor: "#F0FDFA"
-  },
-  pipelineIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#E2E8F0"
-  },
-  pipelineIconActive: {
-    backgroundColor: "#0F766E"
-  },
-  pipelineText: {
-    flex: 1
-  },
-  pipelineTitle: {
-    color: "#64748B",
-    fontWeight: "900"
-  },
-  pipelineTitleActive: {
-    color: "#0F172A"
-  },
-  pipelineDetail: {
-    color: "#64748B",
-    fontSize: 12,
-    marginTop: 3
-  },
-  gradeBadge: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    backgroundColor: "#0F766E",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10
-  },
-  gradeValue: {
-    color: "#FFFFFF",
-    fontSize: 26,
-    fontWeight: "900"
-  },
-  gradeMax: {
-    color: "#CCFBF1",
-    fontWeight: "800",
-    marginBottom: 4
-  },
-  studentSelector: {
-    gap: 10,
-    paddingRight: 12
-  },
-  studentChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    backgroundColor: "#FFFFFF",
-    paddingHorizontal: 10,
-    paddingVertical: 8
-  },
-  studentChipActive: {
-    backgroundColor: "#F0FDFA",
-    borderColor: "#0F766E"
-  },
-  studentAvatar: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  studentAvatarText: {
-    color: "#FFFFFF",
-    fontWeight: "900",
-    fontSize: 11
-  },
-  studentChipText: {
-    color: "#64748B",
-    fontWeight: "800"
-  },
-  studentChipTextActive: {
-    color: "#0F766E"
-  },
-  correctedSummary: {
-    flexDirection: "row",
-    gap: 14,
-    alignItems: "center",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#E2E8F0"
-  },
-  circularScore: {
-    width: 78,
-    height: 78,
-    borderRadius: 39,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#ECFDF5",
-    borderWidth: 8,
-    borderColor: "#0F766E"
-  },
-  circularScoreText: {
-    color: "#0F172A",
-    fontWeight: "900",
-    fontSize: 17
-  },
-  correctedSummaryText: {
-    flex: 1
-  },
-  correctedSummaryTitle: {
-    color: "#0F172A",
-    fontWeight: "900",
-    fontSize: 17
-  },
-  correctedSummaryBody: {
-    color: "#475569",
-    lineHeight: 20,
-    marginTop: 4
-  },
-  correctionCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 15,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    gap: 12
-  },
-  correctionHeader: {
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "flex-start"
-  },
-  correctionQuestionBadge: {
-    width: 38,
-    height: 38,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#F1F5F9"
-  },
-  correctionQuestionText: {
-    color: "#0F172A",
-    fontWeight: "900"
-  },
-  correctionHeaderText: {
-    flex: 1
-  },
-  correctionStatement: {
-    color: "#0F172A",
-    fontWeight: "900",
-    lineHeight: 20
-  },
-  correctionMeta: {
-    color: "#64748B",
-    fontSize: 12,
-    marginTop: 3
-  },
-  correctionScore: {
-    color: "#0F766E",
-    fontWeight: "900",
-    fontSize: 16
-  },
-  answerBox: {
-    backgroundColor: "#F8FAFC",
-    borderRadius: 8,
-    padding: 12,
-    gap: 4
-  },
-  answerLabel: {
-    color: "#64748B",
-    fontWeight: "900",
-    fontSize: 12
-  },
-  answerText: {
-    color: "#0F172A",
-    lineHeight: 20
-  },
-  feedbackBox: {
-    flexDirection: "row",
-    gap: 10,
-    backgroundColor: "#ECFDF5",
-    borderRadius: 8,
-    padding: 12
-  },
-  feedbackText: {
-    flex: 1,
-    color: "#134E4A",
-    lineHeight: 20,
-    fontWeight: "600"
-  },
-  handwritingBox: {
-    flexDirection: "row",
-    gap: 8,
-    alignItems: "center"
-  },
-  handwritingText: {
-    color: "#64748B",
-    fontSize: 12,
-    flex: 1
-  },
-  studyPlan: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 8,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    gap: 12
-  },
-  planItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10
-  },
-  planText: {
-    color: "#334155",
-    flex: 1,
-    lineHeight: 20,
-    fontWeight: "700"
-  },
-  bottomTabs: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    flexDirection: "row",
-    backgroundColor: "#FFFFFF",
-    borderTopWidth: 1,
-    borderTopColor: "#E2E8F0",
-    paddingTop: 8,
-    paddingBottom: 12
-  },
-  tabButton: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
-    minHeight: 54
-  },
-  tabLabel: {
-    fontSize: 11,
-    color: "#94A3B8",
-    fontWeight: "800"
-  },
-  tabLabelActive: {
-    color: "#0F766E"
-  },
-  primaryButton: {
-    minHeight: 52,
-    borderRadius: 8,
-    backgroundColor: "#0F766E",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 9,
-    paddingHorizontal: 16
-  },
-  primaryButtonText: {
-    color: "#FFFFFF",
-    fontWeight: "900",
-    fontSize: 15
-  },
-  secondaryButton: {
-    minHeight: 52,
-    borderRadius: 8,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#99F6E4",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 9,
-    paddingHorizontal: 16
-  },
-  secondaryButtonText: {
-    color: "#0F766E",
-    fontWeight: "900",
-    fontSize: 15
-  },
-  disabledButton: {
-    backgroundColor: "#94A3B8"
-  },
-  secondaryButtonDisabled: {
-    borderColor: "#CBD5E1",
-    backgroundColor: "#F8FAFC"
-  },
-  secondaryButtonTextDisabled: {
-    color: "#94A3B8"
-  }
-});
